@@ -1,0 +1,98 @@
+server:
+  port: 8766
+spring:
+  application:
+    name: gateway-server
+  cloud:
+    gateway:
+      routes:
+        - id: reduceFlow
+          uri: ${user.server}
+          predicates:
+            - Path=/user/**
+          filters:
+            - name: RequestRateLimiter
+              args:
+                #burstCapacity值越大,replenishRate越小,redis中存放数据的key时间越长
+                #redis.key有效期计算规则
+                #local fill_time = capacity/rate
+                #local ttl = math.floor(fill_time*2)
+                #ttl得到的就是redis.key有效期,这个计算规则在我本地经过我验证,是准确的
+                #令牌桶按如下参数可以这么理解：
+                #桶的固定容量是10个令牌,每个请求会消耗1个令牌,另外会按填充平均速率往桶里放令牌,如果某一秒内请求太多,直接消耗掉了桶里的所有令牌,则被限流
+                #需要注意的填充平均速率只是速率,而不是指定值,下面replenishRate=5,并不是每秒往桶里放5个令牌
+                #令牌桶每秒填充平均速率
+                redis-rate-limiter.replenishRate: 5
+                #令牌桶总容量
+                redis-rate-limiter.burstCapacity: 10
+                #edis中key自定义接口实现bean名称,使用SpEL表达式从Spring容器中获取Bean对象
+                key-resolver: "#{@ipKeyResolver}"
+        - id: rewritepath_route
+          uri: ${app.server}
+          predicates:
+            - Path=/testRewritePath #这里是匹配/testRewritePath的请求到此路由中
+          filters:
+            #RewritePath路由是重写请求路径,两个参数,第一个参数是请求时的路径,第二个参数是重写后的请求路径
+            - RewritePath=/testRewritePath, /app/welcome
+        - id: userServer
+          uri: ${user.server}
+          predicates:
+            - Path=/user/**
+          filters:
+            - AddRequestHeader=foo,Bar
+        - id: appServer
+          uri: ${app.server}
+          predicates:
+            - Path=/app/**
+        - id: gatewayServer
+          uri: ${gateway.server}
+          predicates:
+            - Path=/test/fallback
+          filters:
+            - name: Hystrix
+              args:
+                name: gatewayServer
+                fallbackUri: forward:/gateway/fallback
+        #如果该route路由没有显示指定-Path属性,则默认-Path属性=当前网关服务地址,如这里为localhost:8766
+        - id: after_route #每个route的id,唯一id
+          uri: http://httpbin.org:80/get #将要被转发到的目标地址
+          predicates: #断言,每个route路由必填属性,如果没填,启动报错
+            - After=2020-01-20T17:42:47.789-07:00[America/Denver] #AfterRoutePredicateFactory路由,在此时间后的请求会被转发,在此时间前的请求会报404
+        - id: release_route
+          uri: ${app.server}
+          filters:
+            - name: Release #遵循约定大于配置原则,这里的Release指向的是自定义过滤器工厂ReleaseGatewayFilterFactory
+              args:
+                #key是自定义过滤器工厂的内部类ReleaseGatewayFilterFactory.Config中定义的属性
+                #value是分配给自定义过滤器工厂的内部类ReleaseGatewayFilterFactory.Config中定义的属性的值
+                name: release
+                enabled: true
+          predicates:
+            - Path=/base/**
+#user.server是常量名,可以任意配
+#如果目标服务和gateway网关服务都注册到相同的eureka,想直接从eureka找服务,则该常量值必须以lb:开头,代表从eureka找服务
+#如果目标服务和gateway网关服务并不都是注册到相同的eureka,也可以直接写死目标服务的地址
+#user:
+#  server: http://localhost:8764
+user:
+  server: lb://user-server
+app:
+  server: lb://app-server
+gateway:
+  server: lb://gateway-server
+eureka:
+  client:
+    healthcheck:
+      enabled: true
+    serviceUrl:
+      defaultZone: http://eureka1:8761/eureka/,http://eureka2:8762/eureka/
+  instance:
+    lease-expiration-duration-in-seconds: 7
+    lease-renewal-interval-in-seconds: 3
+redis:
+  host: 127.0.0.1
+  poolMaxIdle: 10
+  poolMaxTotal: 10
+  poolMaxWait: 3
+  port: 6379
+  timeout: 3
